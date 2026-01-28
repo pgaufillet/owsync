@@ -669,8 +669,8 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
         char full_path[MAX_PATH_LEN];
         snprintf(full_path, sizeof(full_path), "%s/%s", root, plan->files_to_delete.paths[i]);
 
-        if (access(full_path, F_OK) == 0) {
-            unlink(full_path);
+        /* Attempt to delete file directly (unlink handles non-existent files safely) */
+        if (unlink(full_path) == 0) {
             log_info("Deleted: %s", plan->files_to_delete.paths[i]);
             deletion_performed = true;
         }
