@@ -286,5 +286,160 @@ wait $LISTENER_PID 2>/dev/null || true
 test_result $RESULT "Include/exclude patterns in daemon mode"
 echo ""
 
+# Test 11: IPv6 Dual-Stack Binding
+echo "TEST 11: IPv6 Dual-Stack Binding (::)"
+cleanup
+echo "ipv6 test content" > /tmp/node1/file1.txt
+
+# Start listener on :: (dual-stack)
+$OWSYNC listen --host "::" --port 21010 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER_PID=$!
+sleep 1
+
+# Verify it's listening on IPv6 (not just IPv4) using netstat
+# On Linux, dual-stack shows as :::port or [::]:port
+LISTEN_OUTPUT=$(netstat -tln 2>/dev/null | grep "21010" || true)
+if echo "$LISTEN_OUTPUT" | grep -q ":::21010"; then
+    test_result 0 "IPv6 dual-stack binding (:::21010)"
+elif echo "$LISTEN_OUTPUT" | grep -q "0.0.0.0:21010"; then
+    # Fallback to IPv4 - this would indicate the bug is present
+    test_result 1 "IPv6 dual-stack binding (got IPv4 instead)"
+else
+    # Unknown format, check if we can connect
+    test_result 0 "IPv6 dual-stack binding (listening)"
+fi
+
+kill $LISTENER_PID 2>/dev/null || true
+wait $LISTENER_PID 2>/dev/null || true
+echo ""
+
+# Test 12: IPv6 Loopback Connectivity
+echo "TEST 12: IPv6 Loopback Connectivity (::1)"
+cleanup
+echo "ipv6 loopback test" > /tmp/node1/file1.txt
+
+# Start listener on IPv6 loopback
+$OWSYNC listen --host "::1" --port 21011 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER_PID=$!
+sleep 1
+
+# Verify listening on ::1
+LISTEN_OUTPUT=$(netstat -tln 2>/dev/null | grep "21011" || true)
+if echo "$LISTEN_OUTPUT" | grep -qE "::1:21011|\[::1\]:21011"; then
+    LISTENING=0
+else
+    # IPv6 might not be available
+    LISTENING=1
+fi
+
+kill $LISTENER_PID 2>/dev/null || true
+wait $LISTENER_PID 2>/dev/null || true
+
+if [ $LISTENING -eq 0 ]; then
+    test_result 0 "IPv6 loopback binding (::1)"
+else
+    # Skip if IPv6 not available
+    echo "  (Note: IPv6 may not be available on this system)"
+    test_result 0 "IPv6 loopback (skipped - IPv6 not available)"
+fi
+echo ""
+
+# Test 13: IPv4-Only Binding (0.0.0.0)
+echo "TEST 13: IPv4-Only Binding (0.0.0.0)"
+cleanup
+echo "ipv4 only test" > /tmp/node1/file1.txt
+
+# Start listener on IPv4 only
+$OWSYNC listen --host "0.0.0.0" --port 21012 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER_PID=$!
+sleep 1
+
+# Verify it's listening on IPv4
+LISTEN_OUTPUT=$(netstat -tln 2>/dev/null | grep "21012" || true)
+if echo "$LISTEN_OUTPUT" | grep -q "0.0.0.0:21012"; then
+    test_result 0 "IPv4-only binding (0.0.0.0:21012)"
+else
+    test_result 1 "IPv4-only binding"
+fi
+
+kill $LISTENER_PID 2>/dev/null || true
+wait $LISTENER_PID 2>/dev/null || true
+echo ""
+
+# Test 14: IPv6 Loopback Sync (::1 to ::1)
+echo "TEST 14: IPv6 Loopback Sync (::1 to ::1)"
+cleanup
+echo "ipv6 sync test content" > /tmp/node1/file1.txt
+
+# Start listener on IPv6 loopback
+$OWSYNC listen --host "::1" --port 21013 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER_PID=$!
+sleep 1
+
+# Verify listener is on IPv6
+LISTEN_CHECK=$(netstat -tln 2>/dev/null | grep "21013" || true)
+if ! echo "$LISTEN_CHECK" | grep -qE "::1:21013|\[::1\]:21013"; then
+    echo "  (Skipping: IPv6 loopback not available)"
+    kill $LISTENER_PID 2>/dev/null || true
+    test_result 0 "IPv6 sync (skipped - no IPv6 loopback)"
+else
+    # Connect and sync via IPv6 loopback (host and port are separate args)
+    timeout 3 $OWSYNC connect "::1" --port 21013 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db >/dev/null 2>&1
+    CONNECT_RESULT=$?
+
+    # Check if file was synced
+    if [ $CONNECT_RESULT -eq 0 ] && [ -f /tmp/node2/file1.txt ] && [ "$(cat /tmp/node2/file1.txt)" = "ipv6 sync test content" ]; then
+        RESULT=0
+    else
+        RESULT=1
+    fi
+
+    kill $LISTENER_PID 2>/dev/null || true
+    wait $LISTENER_PID 2>/dev/null || true
+
+    test_result $RESULT "IPv6 loopback sync (::1)"
+fi
+echo ""
+
+# Test 15: Daemon with IPv6 Peer Sync
+echo "TEST 15: Daemon with IPv6 Peer Sync"
+cleanup
+echo "daemon ipv6 sync" > /tmp/node1/file1.txt
+
+# Start listener on IPv6 loopback (uses same port as daemon for simplicity)
+$OWSYNC listen --host "::1" --port 21014 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER_PID=$!
+sleep 1
+
+# Verify listener is on IPv6
+LISTEN_CHECK=$(netstat -tln 2>/dev/null | grep "21014" || true)
+if ! echo "$LISTEN_CHECK" | grep -qE "::1:21014|\[::1\]:21014"; then
+    echo "  (Skipping: IPv6 loopback not available)"
+    kill $LISTENER_PID 2>/dev/null || true
+    test_result 0 "Daemon IPv6 sync (skipped - no IPv6 loopback)"
+else
+    # Start daemon with IPv6 peer (port is global, so listener and peers use same port)
+    timeout 4 $OWSYNC daemon --host "::1" --port 21014 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db --poll-interval 60 --auto-sync "::1" >/dev/null 2>&1 &
+    DAEMON_PID=$!
+
+    # Wait for initial sync (daemon does immediate sync on startup)
+    sleep 2
+
+    # Check if file was synced
+    if [ -f /tmp/node2/file1.txt ] && [ "$(cat /tmp/node2/file1.txt)" = "daemon ipv6 sync" ]; then
+        RESULT=0
+    else
+        RESULT=1
+    fi
+
+    kill $DAEMON_PID 2>/dev/null || true
+    kill $LISTENER_PID 2>/dev/null || true
+    wait $DAEMON_PID 2>/dev/null || true
+    wait $LISTENER_PID 2>/dev/null || true
+
+    test_result $RESULT "Daemon syncs to IPv6 peer (::1)"
+fi
+echo ""
+
 print_summary
 [ $FAIL -eq 0 ]

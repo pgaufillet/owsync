@@ -928,64 +928,127 @@ static void *handle_connection(void *arg) {
 
 /*
  * Start TCP server accepting sync connections.
- * Supports both IPv4 and IPv6 via getaddrinfo().
+ * Supports both IPv4 and IPv6.
  * Spawns detached thread per connection. Runs until process termination.
  *
  * @param host  Host to bind ("::" for dual-stack, "0.0.0.0" for IPv4-only, or specific address)
- * @param port  Port to bind (as string for getaddrinfo)
+ * @param port  Port to bind (as string)
  */
 int start_server(const char *host, const char *port, const char *key,
                  const char *root, const char *db_path, file_filter_t *filter,
                  int64_t clock_offset) {
     if (!host || !port || !root || !db_path) return OWSYNC_ERROR;
 
-    struct addrinfo hints = {0};
-    hints.ai_family = AF_UNSPEC;     /* Accept IPv4 or IPv6 */
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;     /* For bind() */
-
-    /* Map wildcard addresses to NULL for AI_PASSIVE binding */
-    const char *node = (strcmp(host, "0.0.0.0") == 0 || strcmp(host, "::") == 0) ? NULL : host;
-
-    struct addrinfo *result = NULL;
-    int gai_err = getaddrinfo(node, port, &hints, &result);
-
-    if (gai_err != 0) {
-        log_error("getaddrinfo failed: %s", gai_strerror(gai_err));
-        return OWSYNC_ERROR_IO;
-    }
-
     int sockfd = -1;
-    struct addrinfo *rp;
-    for (rp = result; rp != NULL; rp = rp->ai_next) {
-        sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sockfd < 0) continue;
+    int port_num = atoi(port);
+    int opt = 1;
 
-        int opt = 1;
+    /*
+     * Handle wildcard addresses explicitly (like lease-sync does).
+     * This avoids getaddrinfo returning IPv4 first when we want IPv6 dual-stack.
+     */
+    if (strcmp(host, "::") == 0) {
+        /* IPv6 dual-stack: try IPv6 first, fall back to IPv4 if unavailable */
+        sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            if (errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT) {
+                log_info("IPv6 not available, falling back to IPv4-only");
+                goto ipv4_fallback;
+            }
+            log_error("socket(AF_INET6) failed: %s", strerror(errno));
+            return OWSYNC_ERROR_IO;
+        }
+
         setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-        /* For IPv6 sockets, allow IPv4 connections too (dual-stack) */
-        if (rp->ai_family == AF_INET6) {
-            int v6only = 0;
-            setsockopt(sockfd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+        /* Enable dual-stack: allow IPv4 connections via IPv4-mapped addresses */
+        int v6only = 0;
+        if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0) {
+            log_warning("setsockopt(IPV6_V6ONLY) failed: %s", strerror(errno));
+            /* Continue anyway - dual-stack might still work */
         }
 
-        if (bind(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
-            break;  /* Success */
+        struct sockaddr_in6 addr6 = {0};
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_addr = in6addr_any;
+        addr6.sin6_port = htons(port_num);
+
+        if (bind(sockfd, (struct sockaddr *)&addr6, sizeof(addr6)) < 0) {
+            log_error("bind(:::%d) failed: %s", port_num, strerror(errno));
+            close(sockfd);
+            return OWSYNC_ERROR_IO;
         }
 
-        close(sockfd);
-        sockfd = -1;
-    }
+        log_info("Bound to IPv6 dual-stack (:::%d)", port_num);
 
-    freeaddrinfo(result);
+    } else if (strcmp(host, "0.0.0.0") == 0) {
+ipv4_fallback:
+        /* IPv4-only */
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            log_error("socket(AF_INET) failed: %s", strerror(errno));
+            return OWSYNC_ERROR_IO;
+        }
 
-    if (sockfd < 0) {
-        log_error("Could not bind to %s:%s", host, port);
-        return OWSYNC_ERROR_IO;
+        setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        struct sockaddr_in addr4 = {0};
+        addr4.sin_family = AF_INET;
+        addr4.sin_addr.s_addr = INADDR_ANY;
+        addr4.sin_port = htons(port_num);
+
+        if (bind(sockfd, (struct sockaddr *)&addr4, sizeof(addr4)) < 0) {
+            log_error("bind(0.0.0.0:%d) failed: %s", port_num, strerror(errno));
+            close(sockfd);
+            return OWSYNC_ERROR_IO;
+        }
+
+        log_info("Bound to IPv4-only (0.0.0.0:%d)", port_num);
+
+    } else {
+        /* Specific address: use getaddrinfo to resolve */
+        struct addrinfo hints = {0};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_PASSIVE;
+
+        struct addrinfo *result = NULL;
+        int gai_err = getaddrinfo(host, port, &hints, &result);
+        if (gai_err != 0) {
+            log_error("getaddrinfo(%s) failed: %s", host, gai_strerror(gai_err));
+            return OWSYNC_ERROR_IO;
+        }
+
+        struct addrinfo *rp;
+        for (rp = result; rp != NULL; rp = rp->ai_next) {
+            sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (sockfd < 0) continue;
+
+            setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            if (rp->ai_family == AF_INET6) {
+                int v6only = 0;
+                setsockopt(sockfd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+            }
+
+            if (bind(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
+                break;  /* Success */
+            }
+
+            close(sockfd);
+            sockfd = -1;
+        }
+
+        freeaddrinfo(result);
+
+        if (sockfd < 0) {
+            log_error("Could not bind to %s:%s", host, port);
+            return OWSYNC_ERROR_IO;
+        }
     }
 
     if (listen(sockfd, 10) < 0) {
+        log_error("listen() failed: %s", strerror(errno));
         close(sockfd);
         return OWSYNC_ERROR_IO;
     }
