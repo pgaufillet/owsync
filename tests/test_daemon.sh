@@ -304,9 +304,15 @@ if echo "$LISTEN_OUTPUT" | grep -q ":::21010"; then
 elif echo "$LISTEN_OUTPUT" | grep -q "0.0.0.0:21010"; then
     # Fallback to IPv4 - this would indicate the bug is present
     test_result 1 "IPv6 dual-stack binding (got IPv4 instead)"
+elif [ -z "$LISTEN_OUTPUT" ]; then
+    test_result 1 "IPv6 dual-stack binding (server not listening)"
 else
-    # Unknown format, check if we can connect
-    test_result 0 "IPv6 dual-stack binding (listening)"
+    # Some other format but listening - verify daemon is running
+    if kill -0 $LISTENER_PID 2>/dev/null; then
+        test_result 0 "IPv6 dual-stack binding (listening on alternate format)"
+    else
+        test_result 1 "IPv6 dual-stack binding (daemon crashed)"
+    fi
 fi
 
 kill $LISTENER_PID 2>/dev/null || true
@@ -339,8 +345,7 @@ if [ $LISTENING -eq 0 ]; then
     test_result 0 "IPv6 loopback binding (::1)"
 else
     # Skip if IPv6 not available
-    echo "  (Note: IPv6 may not be available on this system)"
-    test_result 0 "IPv6 loopback (skipped - IPv6 not available)"
+    test_skip "IPv6 loopback binding (IPv6 not available on this system)"
 fi
 echo ""
 
@@ -379,9 +384,8 @@ sleep 1
 # Verify listener is on IPv6
 LISTEN_CHECK=$(netstat -tln 2>/dev/null | grep "21013" || true)
 if ! echo "$LISTEN_CHECK" | grep -qE "::1:21013|\[::1\]:21013"; then
-    echo "  (Skipping: IPv6 loopback not available)"
     kill $LISTENER_PID 2>/dev/null || true
-    test_result 0 "IPv6 sync (skipped - no IPv6 loopback)"
+    test_skip "IPv6 loopback sync (IPv6 not available)"
 else
     # Connect and sync via IPv6 loopback (host and port are separate args)
     timeout 3 $OWSYNC connect "::1" --port 21013 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db >/dev/null 2>&1
@@ -414,9 +418,8 @@ sleep 1
 # Verify listener is on IPv6
 LISTEN_CHECK=$(netstat -tln 2>/dev/null | grep "21014" || true)
 if ! echo "$LISTEN_CHECK" | grep -qE "::1:21014|\[::1\]:21014"; then
-    echo "  (Skipping: IPv6 loopback not available)"
     kill $LISTENER_PID 2>/dev/null || true
-    test_result 0 "Daemon IPv6 sync (skipped - no IPv6 loopback)"
+    test_skip "Daemon IPv6 sync (IPv6 not available)"
 else
     # Start daemon with IPv6 peer (port is global, so listener and peers use same port)
     timeout 4 $OWSYNC daemon --host "::1" --port 21014 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db --poll-interval 60 --auto-sync "::1" >/dev/null 2>&1 &

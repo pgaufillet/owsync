@@ -144,14 +144,25 @@ echo ""
 echo "TEST 7: Empty Directory Handling"
 cleanup
 mkdir -p /tmp/node1/empty_dir
+# Also create a regular file to ensure sync is working
+echo "marker" > /tmp/node1/marker.txt
 
 $OWSYNC listen --host 127.0.0.1 --port 22007 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db &
 PID=$!; sleep 1
 $OWSYNC connect 127.0.0.1 --port 22007 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db >/dev/null 2>&1
-kill $PID 2>/dev/null
-
-# Empty directories may or may not be synced - just ensure no crash
-test_result 0 "Empty directory handling"
+sleep 0.5
+# Check if daemon is still running (didn't crash)
+if kill -0 $PID 2>/dev/null; then
+    kill $PID 2>/dev/null || true
+    # Verify marker file was synced (proves daemon worked, empty dir is just not synced)
+    if [ -f /tmp/node2/marker.txt ]; then
+        test_result 0 "Empty directory handled (daemon didn't crash, files synced)"
+    else
+        test_result 1 "Empty directory caused sync failure"
+    fi
+else
+    test_result 1 "Empty directory caused daemon crash"
+fi
 echo ""
 
 # Test 8: Many Files

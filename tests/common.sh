@@ -13,6 +13,7 @@ NC='\033[0m' # No Color
 # Test counters
 PASS=0
 FAIL=0
+SKIP=0
 
 # Binary location
 OWSYNC="${OWSYNC:-../bin/owsync}"
@@ -47,6 +48,13 @@ test_result() {
     fi
 }
 
+# Mark a test as skipped (environment not suitable, not a failure)
+# Usage: test_skip "reason"
+test_skip() {
+    echo -e "${YELLOW}⏭️  SKIP${NC}: $1"
+    SKIP=$((SKIP + 1))
+}
+
 cleanup() {
     # Try graceful termination first, then force
     pkill owsync 2>/dev/null || true
@@ -61,13 +69,17 @@ print_summary() {
     echo "========================================="
     echo "Test Summary"
     echo "========================================="
-    echo -e "Total Tests: $((PASS + FAIL))"
+    local total=$((PASS + FAIL))
+    echo -e "Total Tests: $total (+ $SKIP skipped)"
     echo -e "${GREEN}Passed: $PASS${NC}"
     echo -e "${RED}Failed: $FAIL${NC}"
-    if [ $FAIL -eq 0 ]; then
+    echo -e "${YELLOW}Skipped: $SKIP${NC}"
+    if [ $total -eq 0 ]; then
+        RATE=0
+    elif [ $FAIL -eq 0 ]; then
         RATE=100
     else
-        RATE=$(( (PASS * 100) / (PASS + FAIL) ))
+        RATE=$(( (PASS * 100) / total ))
     fi
     echo -e "Pass Rate: ${YELLOW}${RATE}%${NC}"
     echo "========================================="

@@ -137,9 +137,10 @@ else
         # Verify DB was recreated (valid JSON now)
         if python3 -c "import json; json.load(open('/tmp/node1/owsync.db'))" 2>/dev/null || \
            jq . /tmp/node1/owsync.db >/dev/null 2>&1; then
-            test_result 0 "Corrupted database recovery"
+            test_result 0 "Corrupted database recovery (DB recreated as valid JSON)"
         else
-            test_result 0 "Corrupted database handled (DB not recreated but sync worked)"
+            # Sync worked but DB still invalid - partial recovery
+            test_result 1 "Corrupted database recovery (sync worked but DB still invalid)"
         fi
     else
         test_result 1 "Corrupted database recovery (sync failed)"
@@ -173,15 +174,30 @@ echo "TEST 10: Very Long Filename"
 cleanup
 # Create a file with a very long name (but within limits)
 LONGNAME=$(printf 'a%.0s' {1..200})
-echo "content" > "/tmp/node1/$LONGNAME.txt" 2>/dev/null || echo "content" > "/tmp/node1/longfile.txt"
+if echo "content" > "/tmp/node1/$LONGNAME.txt" 2>/dev/null; then
+    TESTFILE="$LONGNAME.txt"
+else
+    echo "content" > "/tmp/node1/longfile.txt"
+    TESTFILE="longfile.txt"
+fi
 
 $OWSYNC listen --host 127.0.0.1 --port 21006 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db &
 PID=$!; sleep 1
 $OWSYNC connect 127.0.0.1 --port 21006 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db >/dev/null 2>&1
-kill $PID 2>/dev/null
+sleep 0.5
+kill $PID 2>/dev/null || true
 
-# Should handle long filename gracefully (may or may not sync depending on limits)
-test_result 0 "Long filename handled"
+# Verify long filename didn't crash the daemon (check if we got any file)
+if [ -f "/tmp/node2/$TESTFILE" ] || ls /tmp/node2/*.txt 2>/dev/null | grep -q .; then
+    test_result 0 "Long filename synced successfully"
+else
+    # Check if daemon crashed vs just didn't sync the file
+    if [ -d /tmp/node2 ]; then
+        test_result 1 "Long filename sync failed (no files synced)"
+    else
+        test_result 1 "Long filename caused daemon failure"
+    fi
+fi
 echo ""
 
 cleanup
