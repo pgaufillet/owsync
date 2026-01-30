@@ -107,14 +107,44 @@ timeout 5 $OWSYNC connect 127.0.0.1 --port 21999 --plain -i '*' --dir /tmp/node1
 test_result $? "Connection failure detected"
 echo ""
 
-# Test 8: Corrupted Database
-echo "TEST 8: Corrupted Database"
+# Test 8: Corrupted Database Recovery
+echo "TEST 8: Corrupted Database Recovery"
 cleanup
-echo "This is not a valid SQLite database" > /tmp/node1/owsync.db
-# Should handle gracefully - either recreate or fail cleanly
-timeout 5 $OWSYNC listen --host 127.0.0.1 --port 21004 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db >/dev/null 2>&1 || true
-# As long as it doesn't crash, this is acceptable
-test_result 0 "Corrupted database handled"
+echo "test content" > /tmp/node1/file.txt
+
+# Create corrupted database (invalid JSON)
+echo "This is not valid JSON {{{" > /tmp/node1/owsync.db
+
+# Start listener with corrupted DB
+$OWSYNC listen --host 127.0.0.1 --port 21004 --plain -i '*' \
+    --dir /tmp/node1 --db /tmp/node1/owsync.db >/dev/null 2>&1 &
+PID=$!
+sleep 2
+
+# Verify process is running (didn't crash)
+if ! kill -0 $PID 2>/dev/null; then
+    kill $PID 2>/dev/null || true
+    test_result 1 "Corrupted database recovery (process crashed)"
+else
+    # Try to sync - should work after recovery
+    $OWSYNC connect 127.0.0.1 --port 21004 --plain -i '*' \
+        --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1
+
+    kill $PID 2>/dev/null || true
+
+    # Verify file was synced (proves recovery worked)
+    if [ -f /tmp/node2/file.txt ]; then
+        # Verify DB was recreated (valid JSON now)
+        if python3 -c "import json; json.load(open('/tmp/node1/owsync.db'))" 2>/dev/null || \
+           jq . /tmp/node1/owsync.db >/dev/null 2>&1; then
+            test_result 0 "Corrupted database recovery"
+        else
+            test_result 0 "Corrupted database handled (DB not recreated but sync worked)"
+        fi
+    else
+        test_result 1 "Corrupted database recovery (sync failed)"
+    fi
+fi
 echo ""
 
 # Test 9: Conflicting Listener on Same Port

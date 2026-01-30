@@ -604,7 +604,9 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
     database_t *db = database_new();
     if (!db) return OWSYNC_ERROR_MEMORY;
 
-    database_load(db, db_path);
+    if (database_load(db, db_path) != OWSYNC_OK) {
+        log_warning("Database load failed, will rebuild from filesystem scan");
+    }
 
     bool dirty = false;
     log_debug("Scanning directory %s", root);

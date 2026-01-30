@@ -173,7 +173,9 @@ static void *poller_thread(void *arg) {
         return NULL;
     }
 
-    database_load(db, ctx->db_path);
+    if (database_load(db, ctx->db_path) != OWSYNC_OK) {
+        log_warning("Database load failed, will rebuild from filesystem scan");
+    }
 
     bool dirty = false;
     log_info("Performing initial scan...");
@@ -218,7 +220,9 @@ static void *poller_thread(void *arg) {
             continue;
         }
 
-        database_load(db, ctx->db_path);
+        if (database_load(db, ctx->db_path) != OWSYNC_OK) {
+            log_warning("Database load failed, will rebuild from filesystem scan");
+        }
 
         dirty = false;
         result = database_update_from_scan(db, ctx->root, ctx->filter, &dirty);
