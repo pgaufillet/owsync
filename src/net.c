@@ -1110,10 +1110,11 @@ ipv4_fallback:
  *
  * @param host  Peer hostname or IP address (IPv4 or IPv6)
  * @param port  Port to connect to (as string for getaddrinfo)
+ * @param source_address  Local IP to bind before connect (NULL = any)
  */
 int connect_peer(const char *host, const char *port, const char *key,
                  const char *root, const char *db_path, file_filter_t *filter,
-                 int64_t clock_offset) {
+                 int64_t clock_offset, const char *source_address) {
     if (!host || !port || !root || !db_path) return OWSYNC_ERROR;
 
     struct addrinfo hints = {0};
@@ -1128,11 +1129,45 @@ int connect_peer(const char *host, const char *port, const char *key,
         return OWSYNC_ERROR_IO;
     }
 
+    /* Resolve source address if provided */
+    struct addrinfo *source_result = NULL;
+    if (source_address) {
+        struct addrinfo source_hints = {0};
+        source_hints.ai_family = AF_UNSPEC;
+        source_hints.ai_socktype = SOCK_STREAM;
+        source_hints.ai_flags = AI_NUMERICHOST;  /* Source must be an IP address */
+
+        gai_err = getaddrinfo(source_address, "0", &source_hints, &source_result);
+        if (gai_err != 0) {
+            log_error("Invalid source address %s: %s", source_address, gai_strerror(gai_err));
+            freeaddrinfo(result);
+            return OWSYNC_ERROR_IO;
+        }
+    }
+
     int sockfd = -1;
     struct addrinfo *rp;
     for (rp = result; rp != NULL; rp = rp->ai_next) {
         sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (sockfd < 0) continue;
+
+        /* Bind to source address before connect (if specified) */
+        if (source_result) {
+            /* Find matching address family */
+            struct addrinfo *src;
+            for (src = source_result; src != NULL; src = src->ai_next) {
+                if (src->ai_family == rp->ai_family) {
+                    if (bind(sockfd, src->ai_addr, src->ai_addrlen) < 0) {
+                        log_warning("Failed to bind to source %s: %s",
+                                   source_address, strerror(errno));
+                        /* Continue without binding */
+                    } else {
+                        log_debug("Bound to source address: %s", source_address);
+                    }
+                    break;
+                }
+            }
+        }
 
         if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) == 0) {
             break;  /* Success */
@@ -1143,6 +1178,7 @@ int connect_peer(const char *host, const char *port, const char *key,
     }
 
     freeaddrinfo(result);
+    if (source_result) freeaddrinfo(source_result);
 
     if (sockfd < 0) {
         log_error("Could not connect to %s:%s", host, port);

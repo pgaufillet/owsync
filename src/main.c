@@ -535,7 +535,7 @@ static int cmd_connect(int argc, char **argv) {
         fprintf(stderr, "Add include patterns (e.g., '-i *') to sync files.\n");
     }
 
-    int result = connect_peer(peer_host, opts.port, opts.key, opts.dir, opts.db, filter, opts.clock_offset);
+    int result = connect_peer(peer_host, opts.port, opts.key, opts.dir, opts.db, filter, opts.clock_offset, NULL);
 
     file_filter_free(filter);
     free_options(&opts);

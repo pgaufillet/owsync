@@ -444,5 +444,114 @@ else
 fi
 echo ""
 
+# Test 16: Peer With Source Address Format (addr,source)
+echo "TEST 16: Peer With Source Address Format"
+cleanup
+echo "r26 source test" > /tmp/node1/file1.txt
+
+# Start listener (node2 on 127.0.0.2)
+$OWSYNC listen --host 127.0.0.2 --port 21015 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER_PID=$!
+sleep 1
+
+# Start daemon with per-peer source address format: peer,source_address
+# This tests that daemon correctly parses comma-separated format "127.0.0.2,127.0.0.1" into:
+# - parsed_peer = "127.0.0.2" (where to connect)
+# - source_address = "127.0.0.1" (what to bind to before connect)
+timeout 4 $OWSYNC daemon --host 127.0.0.1 --port 21015 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db --poll-interval 60 --auto-sync "127.0.0.2,127.0.0.1" >/dev/null 2>&1 &
+DAEMON_PID=$!
+sleep 2
+
+# Check if file was synced (proves parsing worked and sync succeeded)
+if [ -f /tmp/node2/file1.txt ] && [ "$(cat /tmp/node2/file1.txt)" = "r26 source test" ]; then
+    RESULT=0
+else
+    RESULT=1
+fi
+
+kill $DAEMON_PID 2>/dev/null || true
+kill $LISTENER_PID 2>/dev/null || true
+wait $DAEMON_PID 2>/dev/null || true
+wait $LISTENER_PID 2>/dev/null || true
+
+test_result $RESULT "Peer with source address format (addr,source)"
+echo ""
+
+# Test 17: Multiple Peers Mixed Format (some with source, some without)
+echo "TEST 17: Multiple Peers Mixed Format"
+cleanup
+mkdir -p /tmp/test_node3
+echo "r26 mixed peers test" > /tmp/node1/file1.txt
+
+# Start listeners (node2 on 127.0.0.2, node3 on 127.0.0.3)
+$OWSYNC listen --host 127.0.0.2 --port 21016 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER1_PID=$!
+$OWSYNC listen --host 127.0.0.3 --port 21016 --plain -i '*' --dir /tmp/test_node3 --db /tmp/test_node3/owsync.db >/dev/null 2>&1 &
+LISTENER2_PID=$!
+sleep 1
+
+# Start daemon with mixed peer formats:
+# - 127.0.0.2,127.0.0.1 (with source address)
+# - 127.0.0.3 (without source address - legacy format)
+$OWSYNC daemon --host 127.0.0.1 --port 21016 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db --poll-interval 60 --auto-sync "127.0.0.2,127.0.0.1" --auto-sync 127.0.0.3 >/dev/null 2>&1 &
+DAEMON_PID=$!
+sleep 3
+
+# Check both peers got the file
+if [ -f /tmp/node2/file1.txt ] && [ -f /tmp/test_node3/file1.txt ]; then
+    RESULT=0
+else
+    RESULT=1
+fi
+
+kill $DAEMON_PID 2>/dev/null || true
+kill $LISTENER1_PID 2>/dev/null || true
+kill $LISTENER2_PID 2>/dev/null || true
+wait $DAEMON_PID 2>/dev/null || true
+wait $LISTENER1_PID 2>/dev/null || true
+wait $LISTENER2_PID 2>/dev/null || true
+rm -rf /tmp/test_node3
+
+test_result $RESULT "Mixed peer formats (with/without source)"
+echo ""
+
+# Test 18: IPv6 Peer With Source Address
+echo "TEST 18: IPv6 Peer With Source Address"
+cleanup
+echo "r26 ipv6 source test" > /tmp/node1/file1.txt
+
+# Start listener on IPv6 loopback
+$OWSYNC listen --host "::1" --port 21017 --plain -i '*' --dir /tmp/node2 --db /tmp/node2/owsync.db >/dev/null 2>&1 &
+LISTENER_PID=$!
+sleep 1
+
+# Verify listener is on IPv6
+LISTEN_CHECK=$(netstat -tln 2>/dev/null | grep "21017" || true)
+if ! echo "$LISTEN_CHECK" | grep -qE "::1:21017|\[::1\]:21017"; then
+    kill $LISTENER_PID 2>/dev/null || true
+    test_skip "IPv6 peer with source (IPv6 not available)"
+else
+    # Start daemon with per-peer source address IPv6 format: peer,source
+    # Uses ::1 for both peer and source since we're on loopback
+    timeout 4 $OWSYNC daemon --host "::1" --port 21017 --plain -i '*' --dir /tmp/node1 --db /tmp/node1/owsync.db --poll-interval 60 --auto-sync "::1,::1" >/dev/null 2>&1 &
+    DAEMON_PID=$!
+    sleep 2
+
+    # Check if file was synced
+    if [ -f /tmp/node2/file1.txt ] && [ "$(cat /tmp/node2/file1.txt)" = "r26 ipv6 source test" ]; then
+        RESULT=0
+    else
+        RESULT=1
+    fi
+
+    kill $DAEMON_PID 2>/dev/null || true
+    kill $LISTENER_PID 2>/dev/null || true
+    wait $DAEMON_PID 2>/dev/null || true
+    wait $LISTENER_PID 2>/dev/null || true
+
+    test_result $RESULT "IPv6 peer with source address"
+fi
+echo ""
+
 print_summary
 [ $FAIL -eq 0 ]

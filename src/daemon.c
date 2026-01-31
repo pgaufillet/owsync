@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 
 /* Daemon state shared between server, poller, and signal handler */
 typedef struct {
@@ -49,6 +50,8 @@ typedef struct {
     const char *db_path;     /* Database path (shared) */
     file_filter_t *filter;   /* File filter (shared) */
     int64_t clock_offset;    /* Debug clock offset */
+    char *source_address;    /* Per-peer source address (NULL if not set, owned by task) */
+    char *parsed_peer;       /* Parsed peer address (owned by task) */
 } sync_task_t;
 
 /*
@@ -70,17 +73,28 @@ static void signal_handler(int sig) {
 static void *sync_peer_worker(void *arg) {
     sync_task_t *task = (sync_task_t *)arg;
 
-    log_info("Syncing to peer: %s:%s", task->peer, task->port);
+    /* Use parsed_peer if available (comma-separated format with source) */
+    const char *peer_addr = task->parsed_peer ? task->parsed_peer : task->peer;
 
-    int result = connect_peer(task->peer, task->port, task->key, task->root,
-                              task->db_path, task->filter, task->clock_offset);
-
-    if (result != OWSYNC_OK) {
-        log_error("Sync to %s:%s failed: %d", task->peer, task->port, result);
+    if (task->source_address) {
+        log_info("Syncing to peer: %s:%s (source: %s)", peer_addr, task->port, task->source_address);
     } else {
-        log_info("Sync to %s:%s completed", task->peer, task->port);
+        log_info("Syncing to peer: %s:%s", peer_addr, task->port);
     }
 
+    int result = connect_peer(peer_addr, task->port, task->key, task->root,
+                              task->db_path, task->filter, task->clock_offset,
+                              task->source_address);
+
+    if (result != OWSYNC_OK) {
+        log_error("Sync to %s:%s failed: %d", peer_addr, task->port, result);
+    } else {
+        log_info("Sync to %s:%s completed", peer_addr, task->port);
+    }
+
+    /* Free allocated strings */
+    free(task->source_address);
+    free(task->parsed_peer);
     free(task);  /* Task struct owned by this thread */
     return NULL;
 }
@@ -133,10 +147,30 @@ static void trigger_sync_to_peers(daemon_context_t *ctx) {
         task->filter = ctx->filter;
         task->clock_offset = ctx->clock_offset;
 
+        /* Parse peer format "addr[,source_addr]" */
+        task->source_address = NULL;
+        task->parsed_peer = NULL;
+        const char *comma = strchr(ctx->peers[i], ',');
+        if (comma) {
+            /* Has source address */
+            size_t peer_len = comma - ctx->peers[i];
+            task->parsed_peer = strndup(ctx->peers[i], peer_len);
+            task->source_address = strdup(comma + 1);
+            if (!task->parsed_peer || !task->source_address) {
+                log_error("Failed to allocate peer address strings");
+                free(task->parsed_peer);
+                free(task->source_address);
+                free(task);
+                continue;
+            }
+        }
+
         if (pthread_create(&threads[i], NULL, sync_peer_worker, task) == 0) {
             thread_created[i] = true;
         } else {
             log_error("Failed to create sync thread for %s", ctx->peers[i]);
+            free(task->source_address);
+            free(task->parsed_peer);
             free(task);
         }
     }

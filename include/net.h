@@ -81,9 +81,10 @@ int start_server(const char *host, const char *port, const char *key,
                  const char *root, const char *db_path, file_filter_t *filter,
                  int64_t clock_offset);
 
-/* Client mode: connect to peer, run one sync session */
+/* Client mode: connect to peer, run one sync session
+ * source_address specifies local IP to bind before connect (NULL = any) */
 int connect_peer(const char *host, const char *port, const char *key,
                  const char *root, const char *db_path, file_filter_t *filter,
-                 int64_t clock_offset);
+                 int64_t clock_offset, const char *source_address);
 
 #endif
