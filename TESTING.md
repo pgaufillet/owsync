@@ -10,7 +10,7 @@ That's it! The command will build the binary (if needed) and run all tests.
 
 ## Test Coverage
 
-### Current Status: 67 Automated Tests (100% passing)
+### Test Coverage
 
 The test suite covers:
 - ✅ Configuration parsing and validation
