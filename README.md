@@ -235,7 +235,7 @@ owsync uses a **bidirectional** sync protocol over TCP:
 
 ## License
 
-GPL-2.0-or-later. See LICENSE file.
+MIT. See LICENSE file.
 
 owsync has been developed using Claude Code from Anthropic.
 

@@ -1,9 +1,9 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
-# Copyright (C) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
 # owsync Makefile
 
 PROGRAM = owsync
-VERSION = 1.1.0
+VERSION = 1.2.0
 
 # Directories
 SRC_DIR = src

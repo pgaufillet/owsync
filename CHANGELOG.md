@@ -4,6 +4,11 @@ All notable changes to owsync are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-02-11
+
+### Changed
+- Relicensed from GPL-2.0-or-later to MIT.
+
 ## [1.1.0] - 2026-02-01
 
 ### Added
