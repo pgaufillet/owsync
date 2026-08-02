@@ -23,6 +23,8 @@ The test suite covers:
 - ✅ Daemon mode operation
 - ✅ Error handling
 - ✅ Memory leak detection
+- ✅ Wire-protocol hardening (framing, path traversal, resource limits)
+- ✅ Memory safety under AddressSanitizer + UBSan
 
 ## Running Tests
 
@@ -57,6 +59,9 @@ tests/
 ├── test_errors.sh         # Error handling tests
 ├── test_edge_cases.sh     # Edge case tests
 ├── test_security.sh       # Security regression tests
+├── test_hardening.sh      # Hardening regression tests (framing, traversal, DoS)
+├── test_asan.sh           # Memory safety under ASan + UBSan
+├── proto_probe.py         # Raw wire-protocol probes used by test_hardening.sh
 ├── test_memory_leaks.sh   # Memory leak detection
 ├── test_stability.sh      # Long-running stability tests
 ├── test_stress_longrun.sh # Stress testing (manual)

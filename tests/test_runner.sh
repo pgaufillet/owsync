@@ -63,6 +63,8 @@ run_suite "Error Handling Tests" "./test_errors.sh"
 run_suite "Edge Case Tests" "./test_edge_cases.sh"
 run_suite "Daemon Mode Tests" "./test_daemon.sh"
 run_suite "Security Regression Tests" "./test_security.sh"
+run_suite "Hardening Regression Tests" "./test_hardening.sh"
+run_suite "Memory Safety Tests (ASan + UBSan)" "./test_asan.sh"
 run_suite "Memory Stability Test (Short)" "./test_stability.sh 20"
 
 # Print final summary
