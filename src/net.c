@@ -13,13 +13,129 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <pthread.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <libgen.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #define MAX_CONNECTIONS 50  /* Limit concurrent connections to prevent resource exhaustion */
+
+/*
+ * Per-syscall socket timeout for sync sessions.
+ * A peer that opens a connection and then stalls would otherwise hold one of the
+ * MAX_CONNECTIONS slots forever. The value must stay well above the longest
+ * legitimate silence, which is the peer's initial scan + hash of the sync tree.
+ */
+#define SOCKET_TIMEOUT_SEC 300
+
+/*
+ * Cap on the total size of inbound message buffers held at the same time.
+ *
+ * Without it, MAX_CONNECTIONS peers each announcing a MAX_MESSAGE_SIZE message
+ * make the daemon allocate 50 * 32MB before a single byte of payload arrives -
+ * more RAM than the routers this runs on have.
+ *
+ * The default admits two maximum-size messages at once, which ordinary config
+ * syncing never approaches. Deployments moving large files to many peers
+ * concurrently can raise it at build time; a refused message fails that one
+ * session, which retries on the next poll.
+ */
+#ifndef OWSYNC_MAX_INFLIGHT_RECV_BYTES
+#define OWSYNC_MAX_INFLIGHT_RECV_BYTES (2 * (size_t)MAX_MESSAGE_SIZE)
+#endif
+#define MAX_INFLIGHT_RECV_BYTES OWSYNC_MAX_INFLIGHT_RECV_BYTES
+
 static volatile int active_connections = 0;  /* Atomic counter for DoS protection */
+static size_t inflight_recv_bytes = 0;       /* Bytes reserved by in-progress channel_receive calls */
+static pthread_mutex_t inflight_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Reserve len bytes of receive budget. Returns 0 on success, -1 if the cap would be exceeded. */
+static int inflight_reserve(size_t len) {
+    int ok = 0;
+    pthread_mutex_lock(&inflight_mutex);
+    if (inflight_recv_bytes + len <= MAX_INFLIGHT_RECV_BYTES) {
+        inflight_recv_bytes += len;
+    } else {
+        ok = -1;
+    }
+    pthread_mutex_unlock(&inflight_mutex);
+    return ok;
+}
+
+static void inflight_release(size_t len) {
+    pthread_mutex_lock(&inflight_mutex);
+    inflight_recv_bytes -= len;
+    pthread_mutex_unlock(&inflight_mutex);
+}
+
+/* Bound the time a single read/write may block on a sync socket. */
+static void set_socket_timeouts(int fd) {
+    struct timeval tv = { .tv_sec = SOCKET_TIMEOUT_SEC, .tv_usec = 0 };
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        log_warning("setsockopt(SO_RCVTIMEO) failed: %s", strerror(errno));
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+        log_warning("setsockopt(SO_SNDTIMEO) failed: %s", strerror(errno));
+    }
+}
+
+/* Write exactly len bytes, retrying on EINTR and short writes. Returns 0 on success. */
+static int write_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t done = 0;
+
+    while (done < len) {
+        ssize_t n = write(fd, p + done, len - done);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;
+        done += (size_t)n;
+    }
+    return 0;
+}
+
+/* Read exactly len bytes, retrying on EINTR and short reads. Returns 0 on success. */
+static int read_all(int fd, void *buf, size_t len) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t done = 0;
+
+    while (done < len) {
+        ssize_t n = read(fd, p + done, len - done);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return -1;  /* Peer closed the connection */
+        done += (size_t)n;
+    }
+    return 0;
+}
+
+/*
+ * Parse a JSON document of known length.
+ * json_tokener_parse() is a NUL-terminated-string API; wire buffers are not
+ * NUL-terminated, so parsing them with it reads past the end of the allocation.
+ */
+static struct json_object *json_parse_n(const char *data, size_t len) {
+    if (!data || len == 0 || len > INT32_MAX) return NULL;
+
+    struct json_tokener *tok = json_tokener_new();
+    if (!tok) return NULL;
+
+    struct json_object *obj = json_tokener_parse_ex(tok, data, (int)len);
+    if (json_tokener_get_error(tok) != json_tokener_success) {
+        if (obj) json_object_put(obj);
+        obj = NULL;
+    }
+
+    json_tokener_free(tok);
+    return obj;
+}
 
 /* Create directory and all parent directories (like mkdir -p) */
 static int mkdir_recursive(const char *path, mode_t mode) {
@@ -48,6 +164,21 @@ static int mkdir_recursive(const char *path, mode_t mode) {
         return -1;
     }
     return 0;
+}
+
+/*
+ * Check that an already-resolved path lies inside an already-resolved root.
+ *
+ * The boundary check is what makes a plain prefix comparison safe: without it
+ * "/etc/configuration" passes as being under "/etc/config".
+ */
+static int is_under_root(const char *real_root, const char *real_path) {
+    size_t root_len = strlen(real_root);
+
+    if (strncmp(real_path, real_root, root_len) != 0) return 0;
+    if (real_path[root_len] != '/' && real_path[root_len] != '\0') return 0;
+
+    return 1;
 }
 
 /*
@@ -80,12 +211,47 @@ static int is_path_safe(const char *root, const char *relative_path) {
     if (!realpath(root, real_root)) return 0;
     if (!realpath(full_path, real_full)) return 0;  /* File must exist */
 
-    /* Verify resolved path is under root */
-    size_t root_len = strlen(real_root);
-    if (strncmp(real_full, real_root, root_len) != 0) return 0;
+    return is_under_root(real_root, real_full);
+}
 
-    /* Boundary check: prevent prefix collision (e.g., /root vs /rootdir) */
-    if (real_full[root_len] != '/' && real_full[root_len] != '\0') return 0;
+/*
+ * Validate that the parent directory of relative_path stays within root.
+ *
+ * Receive-side counterpart of is_path_safe(): the target file does not exist
+ * yet, so realpath() cannot resolve it. Resolving the parent directory gives
+ * the same symlink and boundary guarantees for the location being written to.
+ *
+ * out_dir receives the resolved parent directory (used as the rename target dir).
+ */
+static int is_parent_path_safe(const char *root, const char *relative_path,
+                               char *out_dir, size_t out_dir_size) {
+    if (!root || !relative_path) return 0;
+
+    if (relative_path[0] == '/') return 0;
+    if (strstr(relative_path, "..")) return 0;
+
+    char full_path[MAX_PATH_LEN];
+    if (snprintf(full_path, sizeof(full_path), "%s/%s", root, relative_path) >= (int)sizeof(full_path)) {
+        return 0;
+    }
+
+    /* dirname() may modify its argument, so hand it a scratch copy */
+    char dir_copy[MAX_PATH_LEN];
+    if (snprintf(dir_copy, sizeof(dir_copy), "%s", full_path) >= (int)sizeof(dir_copy)) {
+        return 0;
+    }
+    const char *dir = dirname(dir_copy);
+
+    char real_dir[MAX_PATH_LEN];
+    char real_root[MAX_PATH_LEN];
+    if (!realpath(root, real_root)) return 0;
+    if (!realpath(dir, real_dir)) return 0;  /* Directory must exist by now */
+
+    if (!is_under_root(real_root, real_dir)) return 0;
+
+    if (out_dir && snprintf(out_dir, out_dir_size, "%s", real_dir) >= (int)out_dir_size) {
+        return 0;
+    }
 
     return 1;
 }
@@ -420,18 +586,18 @@ int channel_send(channel_t *channel, message_t *msg) {
     }
 
     uint32_t len_be = htonl((uint32_t)data_len);
-    if (write(channel->fd, &len_be, 4) != 4) {
+    if (write_all(channel->fd, &len_be, 4) != 0) {
         if (allocated_buf) free(allocated_buf);
         json_object_put(json);
         return OWSYNC_ERROR_IO;
     }
 
-    ssize_t written = write(channel->fd, data_to_send, data_len);
+    int write_failed = write_all(channel->fd, data_to_send, data_len);
 
     if (allocated_buf) free(allocated_buf);
     json_object_put(json);
 
-    if (written != (ssize_t)data_len) {
+    if (write_failed != 0) {
         return OWSYNC_ERROR_IO;
     }
 
@@ -448,31 +614,41 @@ int channel_receive(channel_t *channel, message_t **out_msg) {
 
     /* Read 4-byte big-endian length prefix */
     uint32_t len_be = 0;
-    if (read(channel->fd, &len_be, 4) != 4) {
+    if (read_all(channel->fd, &len_be, 4) != 0) {
         return OWSYNC_ERROR_IO;
     }
 
     uint32_t len = ntohl(len_be);
+    if (len == 0) {
+        log_error("Incoming message has zero length");
+        return OWSYNC_ERROR_PROTOCOL;
+    }
     if (len > MAX_MESSAGE_SIZE) {
         log_error("Incoming message size %u exceeds MAX_MESSAGE_SIZE (%d)",
                   len, MAX_MESSAGE_SIZE);
         return OWSYNC_ERROR;
     }
 
-    uint8_t *buffer = malloc(len);
-    if (!buffer) return OWSYNC_ERROR_MEMORY;
+    /* Reserve budget before allocating so stalled peers cannot exhaust memory */
+    if (inflight_reserve(len) != 0) {
+        log_error("Refusing %u-byte message: concurrent receive budget exhausted", len);
+        return OWSYNC_ERROR_MEMORY;
+    }
 
-    ssize_t total_read = 0;
-    while (total_read < len) {
-        ssize_t n = read(channel->fd, buffer + total_read, len - total_read);
-        if (n <= 0) {
-            free(buffer);
-            return OWSYNC_ERROR_IO;
-        }
-        total_read += n;
+    uint8_t *buffer = malloc(len);
+    if (!buffer) {
+        inflight_release(len);
+        return OWSYNC_ERROR_MEMORY;
+    }
+
+    if (read_all(channel->fd, buffer, len) != 0) {
+        free(buffer);
+        inflight_release(len);
+        return OWSYNC_ERROR_IO;
     }
 
     uint8_t *json_data = buffer;
+    size_t json_len = len;
 
 #ifdef ENABLE_ENCRYPTION
     if (channel->is_encrypted && channel->security_ctx) {
@@ -483,15 +659,18 @@ int channel_receive(channel_t *channel, message_t **out_msg) {
         free(buffer);
 
         if (result != OWSYNC_OK) {
+            inflight_release(len);
             return result;
         }
 
         json_data = decrypted;
+        json_len = decrypted_len;
     }
 #endif
 
-    struct json_object *root = json_tokener_parse((char *)json_data);
+    struct json_object *root = json_parse_n((const char *)json_data, json_len);
     free(json_data);
+    inflight_release(len);
 
     if (!root) return OWSYNC_ERROR;
 
@@ -504,13 +683,26 @@ int channel_receive(channel_t *channel, message_t **out_msg) {
     return OWSYNC_OK;
 }
 
-/* Get hostname for HELLO message (from environment or "unknown") */
+/*
+ * Get hostname for HELLO message.
+ *
+ * gethostname() rather than $HOSTNAME: the latter is a shell-internal variable
+ * and is absent when the daemon is started by procd or systemd, which made every
+ * peer report itself as "unknown".
+ */
 static char *get_hostname(void) {
-    char *hostname = getenv("HOSTNAME");
-    if (hostname) {
-        return strdup(hostname);
+    char hostname[256];
+
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+        return strdup("unknown");
     }
-    return strdup("unknown");
+    hostname[sizeof(hostname) - 1] = '\0';  /* Truncation leaves it unterminated on some libcs */
+
+    if (hostname[0] == '\0') {
+        return strdup("unknown");
+    }
+
+    return strdup(hostname);
 }
 
 /* Arguments passed to connection handler thread */
@@ -732,6 +924,12 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
                 long file_size = ftell(fp);
                 fseek(fp, 0, SEEK_SET);
 
+                if (file_size < 0) {
+                    log_warning("Cannot determine size of '%s': %s", path, strerror(errno));
+                    fclose(fp);
+                    continue;
+                }
+
                 if (file_size > (MAX_MESSAGE_SIZE / 2)) {
                     log_error("File '%s' too large to sync (%ld bytes). "
                               "Max file size is %d bytes (due to encoding overhead).",
@@ -746,8 +944,19 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
                     continue;
                 }
 
-                fread(data, 1, file_size, fp);
+                size_t got = fread(data, 1, (size_t)file_size, fp);
                 fclose(fp);
+
+                /*
+                 * A short read means the file shrank between ftell() and fread(),
+                 * or I/O failed. Sending it anyway would overwrite the peer's good
+                 * copy with truncated content.
+                 */
+                if (got != (size_t)file_size) {
+                    log_warning("Short read on '%s' (%zu of %ld bytes), not sending", path, got, file_size);
+                    free(data);
+                    continue;
+                }
 
                 message_t *file_msg = message_new(MSG_FILE_CONTENT);
                 file_msg->payload.file_content.path = strdup(path);
@@ -794,25 +1003,21 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
 
             char *dir_path = strdup(full_path);
             char *dir = dirname(dir_path);
+            int mkdir_failed = mkdir_recursive(dir, 0755);
+            free(dir_path);
 
-            if (mkdir_recursive(dir, 0755) != 0) {
-                free(dir_path);
+            if (mkdir_failed != 0) {
                 message_free(msg);
                 continue;
             }
 
-            // Verify directory security
+            /*
+             * Verify the destination directory is really inside root.
+             * Uses the same resolution and boundary rules as the send side.
+             */
             char real_dir[MAX_PATH_LEN];
-            char real_root[MAX_PATH_LEN];
-            bool safe = false;
-            if (realpath(dir, real_dir) && realpath(root, real_root)) {
-                if (strncmp(real_dir, real_root, strlen(real_root)) == 0) {
-                    safe = true;
-                }
-            }
-            free(dir_path);
-
-            if (!safe) {
+            if (!is_parent_path_safe(root, path, real_dir, sizeof(real_dir))) {
+                log_warning("Rejecting '%s': resolves outside sync root", path);
                 message_free(msg);
                 continue;
             }
@@ -825,10 +1030,41 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
 
             int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
             if (fd >= 0) {
-                write(fd, msg->payload.file_content.data, msg->payload.file_content.data_len);
-                fchmod(fd, msg->payload.file_content.mode);
-                close(fd);
-                if (rename(tmp_path, full_path) == 0) {
+                /*
+                 * Commit sequence: write -> fsync -> close -> rename -> fsync(dir).
+                 * Renaming an unsynced temp file only looks atomic: after a power
+                 * cut the destination can reappear empty or with the old contents.
+                 * Any failure before the rename must leave the destination alone.
+                 */
+                int ok = (write_all(fd, msg->payload.file_content.data,
+                                    msg->payload.file_content.data_len) == 0);
+                if (!ok) {
+                    log_error("Write failed for '%s': %s", path, strerror(errno));
+                }
+
+                if (ok && fchmod(fd, msg->payload.file_content.mode) != 0) {
+                    log_warning("fchmod failed for '%s': %s", path, strerror(errno));
+                }
+
+                if (ok && fsync(fd) != 0) {
+                    log_error("fsync failed for '%s': %s", path, strerror(errno));
+                    ok = 0;
+                }
+
+                if (close(fd) != 0 && ok) {
+                    log_error("close failed for '%s': %s", path, strerror(errno));
+                    ok = 0;
+                }
+
+                if (ok && rename(tmp_path, full_path) == 0) {
+                    /* Make the rename itself durable */
+                    int dirfd = open(real_dir, O_RDONLY | O_DIRECTORY);
+                    if (dirfd >= 0) {
+                        if (fsync(dirfd) != 0) {
+                            log_warning("Directory fsync failed for '%s': %s", real_dir, strerror(errno));
+                        }
+                        close(dirfd);
+                    }
                     log_info("Synced: %s", path);
                     received_new_files = true;
                 } else {
@@ -1063,6 +1299,9 @@ ipv4_fallback:
             continue;
         }
 
+        /* Without this, a peer that connects and never speaks holds a slot forever */
+        set_socket_timeouts(client_fd);
+
         connection_args_t *args = malloc(sizeof(connection_args_t));
         if (!args) {
             __sync_fetch_and_sub(&active_connections, 1);
@@ -1174,6 +1413,9 @@ int connect_peer(const char *host, const char *port, const char *key,
         log_error("Could not connect to %s:%s", host, port);
         return OWSYNC_ERROR_IO;
     }
+
+    /* Same reasoning as the accept path: an unresponsive peer must not block the poller forever */
+    set_socket_timeouts(sockfd);
 
     channel_t *channel = NULL;
 

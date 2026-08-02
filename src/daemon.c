@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
 
 /* Daemon state shared between server, poller, and signal handler */
 typedef struct {
@@ -321,8 +322,23 @@ int start_daemon(const char *host, const char *port, const char *key,
     }
 
     g_daemon_ctx = &ctx;
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+
+    /*
+     * sigaction() rather than signal(): the latter has SysV semantics on some
+     * platforms, where the handler is reset to SIG_DFL on first delivery, so a
+     * second SIGTERM would kill the daemon instead of shutting it down cleanly.
+     */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+
+    if (sigaction(SIGINT, &sa, NULL) != 0 || sigaction(SIGTERM, &sa, NULL) != 0) {
+        log_error("Failed to install signal handlers: %s", strerror(errno));
+        pthread_mutex_destroy(&ctx.sync_mutex);
+        return OWSYNC_ERROR;
+    }
 
     pthread_t server_tid, poller_tid;
 

@@ -2,9 +2,11 @@
  * Copyright (c) 2025-2026 Pierre Gaufillet <pierre.gaufillet@bergamote.eu>
  */
 #include "state.h"
+#include "log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 #include <ftw.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -274,15 +276,29 @@ int database_load(database_t *db, const char *path) {
     long file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    char *content = malloc(file_size + 1);
+    /* ftell() returns -1 on non-seekable files (e.g. database= pointing at a FIFO) */
+    if (file_size < 0) {
+        log_error("Cannot determine size of database '%s': %s", path, strerror(errno));
+        fclose(fp);
+        return OWSYNC_ERROR_IO;
+    }
+
+    char *content = malloc((size_t)file_size + 1);
     if (!content) {
         fclose(fp);
         return OWSYNC_ERROR_MEMORY;
     }
 
-    fread(content, 1, file_size, fp);
-    content[file_size] = '\0';
+    size_t got = fread(content, 1, (size_t)file_size, fp);
     fclose(fp);
+
+    /* A truncated read would parse as invalid JSON and silently wipe the database */
+    if (got != (size_t)file_size) {
+        log_error("Short read on database '%s' (%zu of %ld bytes)", path, got, file_size);
+        free(content);
+        return OWSYNC_ERROR_IO;
+    }
+    content[file_size] = '\0';
 
     struct json_object *root = json_tokener_parse(content);
     free(content);
@@ -422,6 +438,7 @@ int database_save(database_t *db, const char *path) {
 /* Context passed to nftw callback via thread-local storage */
 typedef struct {
     database_t *db;       /* Target database for scanned entries */
+    database_t *errored;  /* Files present on disk but not hashable this pass */
     const char *root;     /* Sync root directory path */
     size_t root_len;      /* Length of root (for stripping prefix) */
     file_filter_t *filter;/* Include/exclude patterns */
@@ -465,6 +482,18 @@ static int scan_callback(const char *fpath, const struct stat *sb, int typeflag,
 
     char *hash = NULL;
     if (compute_hash(fpath, &hash) != OWSYNC_OK) {
+        /*
+         * The file exists but could not be read this pass (permission glitch,
+         * transient I/O error, another process holding it). Record it so phase 2
+         * does not mistake it for a deletion: tombstoning it here would delete
+         * the peers' good copies on the next sync.
+         */
+        log_warning("Cannot hash '%s', excluding from this scan", relative_path);
+        if (g_scan_ctx->errored) {
+            file_state_t marker = {0};
+            marker.path = (char *)relative_path;
+            database_put(g_scan_ctx->errored, relative_path, &marker);
+        }
         return 0;
     }
 
@@ -508,8 +537,15 @@ int database_update_from_scan(database_t *db, const char *root, file_filter_t *f
     database_t *disk_db = database_new();
     if (!disk_db) return OWSYNC_ERROR_MEMORY;
 
+    database_t *errored_db = database_new();
+    if (!errored_db) {
+        database_free(disk_db);
+        return OWSYNC_ERROR_MEMORY;
+    }
+
     scan_context_t ctx = {
         .db = disk_db,
+        .errored = errored_db,
         .root = root,
         .root_len = strlen(root),
         .filter = filter,
@@ -517,8 +553,23 @@ int database_update_from_scan(database_t *db, const char *root, file_filter_t *f
     };
 
     g_scan_ctx = &ctx;
-    nftw(root, scan_callback, 64, FTW_PHYS);  /* FTW_PHYS: don't follow symlinks */
+    int scan_rc = nftw(root, scan_callback, 64, FTW_PHYS);  /* FTW_PHYS: don't follow symlinks */
     g_scan_ctx = NULL;
+
+    /*
+     * An aborted walk leaves a partial picture of the disk. Continuing would
+     * read every file the walk never reached as deleted and tombstone it, and
+     * those tombstones then delete the peers' copies. Leaving the database
+     * untouched until the next pass is the only safe option - it also covers
+     * the case of the sync directory being temporarily unavailable.
+     */
+    if (scan_rc != 0) {
+        log_error("Scan of '%s' did not complete (%s); leaving database unchanged",
+                  root, strerror(errno));
+        database_free(disk_db);
+        database_free(errored_db);
+        return OWSYNC_ERROR_IO;
+    }
 
     /* Phase 2: Detect deletions and expire old tombstones */
     for (size_t i = 0; i < db->bucket_count; i++) {
@@ -528,6 +579,13 @@ int database_update_from_scan(database_t *db, const char *root, file_filter_t *f
         while (entry) {
             db_entry_t *next = entry->next;
             file_state_t *disk_state = database_get(disk_db, entry->path);
+
+            /* Unreadable this pass is not the same as deleted - leave the entry alone */
+            if (!disk_state && database_get(errored_db, entry->path)) {
+                prev = entry;
+                entry = next;
+                continue;
+            }
 
             if (!disk_state) {
                 /* File not on disk */
@@ -598,6 +656,7 @@ int database_update_from_scan(database_t *db, const char *root, file_filter_t *f
     }
 
     database_free(disk_db);
+    database_free(errored_db);
     return OWSYNC_OK;
 }
 

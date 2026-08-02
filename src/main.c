@@ -13,9 +13,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+
+/*
+ * Pick where long-running commands send their logs.
+ *
+ * owsync never forks: backgrounding is procd's or systemd's job, which is why the
+ * --foreground flag this replaces only ever changed the log destination. Detecting
+ * a terminal keeps that convenience without advertising a daemonization mode that
+ * does not exist.
+ */
+static log_mode_t default_log_mode(void) {
+    return isatty(STDERR_FILENO) ? LOG_MODE_FOREGROUND : LOG_MODE_DAEMON;
+}
 
 static int validate_directory(const char *path) {
     if (!path) {
@@ -60,7 +73,6 @@ static void print_usage(const char *prog_name) {
     fprintf(stderr, "  -b, --db PATH         Database path (default: /var/lib/owsync/owsync.db)\n");
     fprintf(stderr, "  -i, --include PATTERN Include pattern (can be repeated)\n");
     fprintf(stderr, "  -e, --exclude PATTERN Exclude pattern (can be repeated)\n");
-    fprintf(stderr, "  -f, --foreground      Run in foreground (log to syslog + stderr)\n");
     fprintf(stderr, "  -v, --verbose         Enable debug logging (log_level=3)\n");
     fprintf(stderr, "  -q, --quiet           Quiet mode, errors only (log_level=0)\n");
     fprintf(stderr, "  --log-level N         Set log level (0=error, 1=warning, 2=info, 3=debug)\n");
@@ -115,7 +127,6 @@ typedef struct {
     char **auto_sync_peers;  /* Peer hosts (port is global) */
     size_t auto_sync_count;
     int log_level;      /* 0=error, 1=warning, 2=info, 3=debug */
-    bool foreground;    /* Run in foreground (syslog + stderr) */
 } cli_options_t;
 
 static int parse_options(int argc, char **argv, cli_options_t *opts, int start_idx) {
@@ -134,7 +145,6 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
         {"exclude", required_argument, 0, 'e'},
         {"host", required_argument, 0, 'H'},
         {"port", required_argument, 0, 'P'},
-        {"foreground", no_argument, 0, 'f'},
         {"verbose", no_argument, 0, 'v'},
         {"debug", no_argument, 0, 'v'},  /* alias for --verbose */
         {"quiet", no_argument, 0, 'q'},
@@ -152,7 +162,7 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
     /* First pass: look for config file option */
     optind = start_idx;
     int c;
-    while ((c = getopt_long(argc, argv, "c:pd:b:i:e:H:P:fvqVh", long_options, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "c:pd:b:i:e:H:P:vqVh", long_options, NULL)) != -1) {
         if (c == 'c') {
             opts->config_file = strdup(optarg);
             if (config_load(&config, optarg) != OWSYNC_OK) {
@@ -171,7 +181,6 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
     opts->poll_interval = config.poll_interval;
     opts->log_level = config.log_level;
     opts->plain = config.plain_mode;
-    opts->foreground = false;
     opts->clock_offset = 0;
 
     /* Copy encryption key from config if present */
@@ -220,7 +229,7 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
 
     /* Second pass: parse all CLI options (override config values) */
     optind = start_idx;
-    while ((c = getopt_long(argc, argv, "c:pd:b:i:e:H:P:fvqVh", long_options, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "c:pd:b:i:e:H:P:vqVh", long_options, NULL)) != -1) {
         switch (c) {
         case 'c':
             /* Already handled in first pass */
@@ -263,9 +272,6 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
         case 'P':
             free(opts->port);
             opts->port = strdup(optarg);
-            break;
-        case 'f':
-            opts->foreground = true;
             break;
         case 'v':
             opts->log_level = LOG_LEVEL_DEBUG;
@@ -322,7 +328,13 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
 
 static void free_options(cli_options_t *opts) {
     free(opts->config_file);
-    free(opts->key);
+
+    /* Scrub the encryption key so it does not survive in freed heap or a core dump */
+    if (opts->key) {
+        explicit_bzero(opts->key, strlen(opts->key));
+        free(opts->key);
+    }
+
     free(opts->dir);
     free(opts->db);
     free(opts->host);
@@ -428,7 +440,7 @@ static int cmd_listen(int argc, char **argv) {
     }
 
     /* Initialize logging */
-    log_mode_t log_mode = opts.foreground ? LOG_MODE_FOREGROUND : LOG_MODE_DAEMON;
+    log_mode_t log_mode = default_log_mode();
     log_init("owsync", log_mode, opts.log_level);
 
     if (!opts.plain && !opts.key) {
@@ -488,7 +500,7 @@ static int cmd_connect(int argc, char **argv) {
     }
 
     /* Initialize logging - CLI mode for one-shot commands */
-    log_mode_t log_mode = opts.foreground ? LOG_MODE_FOREGROUND : LOG_MODE_CLI;
+    log_mode_t log_mode = LOG_MODE_CLI;
     log_init("owsync", log_mode, opts.log_level);
 
     if (!opts.plain && !opts.key) {
@@ -541,7 +553,7 @@ static int cmd_daemon(int argc, char **argv) {
     }
 
     /* Initialize logging */
-    log_mode_t log_mode = opts.foreground ? LOG_MODE_FOREGROUND : LOG_MODE_DAEMON;
+    log_mode_t log_mode = default_log_mode();
     log_init("owsync", log_mode, opts.log_level);
 
     if (!opts.plain && !opts.key) {
@@ -597,6 +609,13 @@ static int cmd_daemon(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    /*
+     * A peer disconnecting mid-write raises SIGPIPE, whose default action kills
+     * the process. Ignoring it once here covers every command that talks to a
+     * socket; the write paths already report the resulting EPIPE.
+     */
+    signal(SIGPIPE, SIG_IGN);
+
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;

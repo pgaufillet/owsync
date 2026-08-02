@@ -54,6 +54,14 @@ ifdef MAX_MESSAGE_SIZE
     override CFLAGS += -DOWSYNC_MAX_MESSAGE_SIZE=$(MAX_MESSAGE_SIZE)
 endif
 
+# Optional: total size of inbound message buffers allowed at once
+# (default: two maximum-size messages). Raise it only if large files are synced
+# to several peers concurrently; it bounds memory a hostile peer can reserve.
+# Usage: make MAX_INFLIGHT_RECV_BYTES=$((128*1024*1024))
+ifdef MAX_INFLIGHT_RECV_BYTES
+    override CFLAGS += -DOWSYNC_MAX_INFLIGHT_RECV_BYTES=$(MAX_INFLIGHT_RECV_BYTES)
+endif
+
 # Source files
 SOURCES = $(SRC_DIR)/common.c \
           $(SRC_DIR)/config.c \
