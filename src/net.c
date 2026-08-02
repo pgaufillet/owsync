@@ -35,8 +35,14 @@
  * Cap on the total size of inbound message buffers held at the same time.
  *
  * Without it, MAX_CONNECTIONS peers each announcing a MAX_MESSAGE_SIZE message
- * make the daemon allocate 50 * 32MB before a single byte of payload arrives -
- * more RAM than the routers this runs on have.
+ * make the daemon reserve 50 * 32MB of address space. malloc() commits pages
+ * only on first touch, so the announcement alone costs almost no memory. It is
+ * still a denial of service: on the 32-bit targets OpenWrt mostly ships, 1.6GB
+ * exhausts the user address space and malloc() then fails process-wide rather
+ * than only for the connection that caused it; and a peer trickling payload
+ * faults its buffer in progressively while the per-syscall timeout keeps
+ * restarting, so residency grows without the connection ever being idle long
+ * enough to drop.
  *
  * The default admits two maximum-size messages at once, which ordinary config
  * syncing never approaches. Deployments moving large files to many peers
@@ -1420,7 +1426,13 @@ int connect_peer(const char *host, const char *port, const char *key,
         return OWSYNC_ERROR_IO;
     }
 
-    /* Same reasoning as the accept path: an unresponsive peer must not block the poller forever */
+    /*
+     * Bounds the reads and writes of the session that follows, as on the accept
+     * path. The connect() above is not covered - it has already completed here -
+     * so an unresponsive peer still costs the kernel's TCP retry time (~130s by
+     * default) before this takes effect. Tolerable because daemon.c syncs peers
+     * on one thread each, so a dead peer delays only its own.
+     */
     set_socket_timeouts(sockfd);
 
     channel_t *channel = NULL;
