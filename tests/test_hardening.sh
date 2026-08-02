@@ -282,6 +282,70 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# TEST 9: numeric options reject malformed values instead of guessing
+#
+# atoi() has no error return, so a bad value became 0 and out-of-range values
+# wrapped. The port only reaches atoi() on the wildcard binds ("::" and
+# "0.0.0.0") - which is the default - so the generic getaddrinfo() path never
+# caught it.
+# ---------------------------------------------------------------------------
+echo ""
+echo "TEST 9: malformed numeric options are rejected"
+
+reset_dirs
+
+# A binary that accepts the value keeps listening: exit 124 means accepted.
+assert_port_rejected() {
+    local value="$1"
+    local why="$2"
+    set +e
+    timeout 3 $OWSYNC listen --host :: --port "$value" --plain -i '*' \
+        --dir "$BASE/node2" --db "$BASE/node2/owsync.db" >/dev/null 2>&1
+    local rc=$?
+    set -e
+    stop_listener
+    if [ $rc -eq 124 ]; then
+        test_result 1 "--port '$value' must be rejected ($why)"
+    else
+        test_result 0 "--port '$value' is rejected ($why)"
+    fi
+}
+
+assert_port_rejected abc   "used to bind an ephemeral port"
+assert_port_rejected 0     "used to bind an ephemeral port"
+assert_port_rejected 99999 "used to wrap to 34463"
+assert_port_rejected -1    "used to wrap to 65535"
+
+# --poll-interval -1 became UINT32_MAX seconds (~136 years), which passed the
+# "< 1" guard because the field is unsigned - polling was silently disabled.
+set +e
+timeout 3 $OWSYNC daemon --poll-interval -1 --auto-sync 127.0.0.1 \
+    --host 127.0.0.1 --port 21908 --plain -i '*' \
+    --dir "$BASE/node2" --db "$BASE/node2/owsync.db" >/dev/null 2>&1
+POLL_RC=$?
+set -e
+stop_listener
+
+if [ $POLL_RC -eq 124 ]; then
+    test_result 1 "--poll-interval -1 must be rejected (used to disable polling)"
+else
+    test_result 0 "--poll-interval -1 is rejected"
+fi
+
+# --log-level abc became 0 (errors only), silently quieting the daemon.
+set +e
+timeout 3 $OWSYNC scan "$BASE/node1" --log-level abc -i '*' \
+    --db "$BASE/node1/owsync.db" >/dev/null 2>&1
+LEVEL_RC=$?
+set -e
+
+if [ $LEVEL_RC -eq 0 ]; then
+    test_result 1 "--log-level abc must be rejected (used to mean errors-only)"
+else
+    test_result 0 "--log-level abc is rejected"
+fi
+
 reset_dirs
 rm -rf "$BASE"
 print_summary

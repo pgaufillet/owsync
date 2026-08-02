@@ -8,6 +8,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <ctype.h>
+#include <errno.h>
 
 /* Create dynamic buffer with specified initial capacity */
 buffer_t *buffer_new(size_t initial_capacity) {
@@ -113,4 +114,27 @@ uint64_t get_time_ms(void) {
 /* Get current time in seconds since Unix epoch */
 uint64_t get_time_sec(void) {
     return (uint64_t)time(NULL);
+}
+
+/*
+ * Parse a decimal integer, rejecting anything atoi() would silently accept:
+ * empty input, trailing characters, overflow, and out-of-range values.
+ * Returns OWSYNC_OK and writes *out on success, OWSYNC_ERROR otherwise.
+ */
+int parse_long_strict(const char *str, long min, long max, long *out) {
+    if (!str || !out || *str == '\0')
+        return OWSYNC_ERROR;
+
+    errno = 0;
+    char *endptr;
+    long val = strtol(str, &endptr, 10);
+
+    if (endptr == str || *endptr != '\0')
+        return OWSYNC_ERROR;  /* No digits, or trailing garbage */
+
+    if (errno == ERANGE || val < min || val > max)
+        return OWSYNC_ERROR;
+
+    *out = val;
+    return OWSYNC_OK;
 }

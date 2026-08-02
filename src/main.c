@@ -279,20 +279,31 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
         case 'q':
             opts->log_level = LOG_LEVEL_ERROR;
             break;
-        case 2002:
-            opts->log_level = atoi(optarg);
-            if (opts->log_level < 0) opts->log_level = 0;
-            if (opts->log_level > 3) opts->log_level = 3;
+        case 2002: {
+            long level;
+            if (parse_long_strict(optarg, LOG_LEVEL_ERROR, LOG_LEVEL_DEBUG, &level) != OWSYNC_OK) {
+                fprintf(stderr, "Error: invalid --log-level '%s' (expected %d-%d)\n",
+                        optarg, LOG_LEVEL_ERROR, LOG_LEVEL_DEBUG);
+                return OWSYNC_ERROR;
+            }
+            opts->log_level = (int)level;
             break;
+        }
 #ifdef DEBUG
         case 1000:
             opts->clock_offset = atoll(optarg);
             break;
 #endif
-        case 2000:
-            opts->poll_interval = (uint32_t)atoi(optarg);
-            if (opts->poll_interval < 1) opts->poll_interval = 60;
+        case 2000: {
+            long interval;
+            if (parse_long_strict(optarg, 1, INT32_MAX, &interval) != OWSYNC_OK) {
+                fprintf(stderr, "Error: invalid --poll-interval '%s' (expected 1-%d seconds)\n",
+                        optarg, INT32_MAX);
+                return OWSYNC_ERROR;
+            }
+            opts->poll_interval = (uint32_t)interval;
             break;
+        }
         case 2001: {
             char **new_peers = realloc(opts->auto_sync_peers,
                                        sizeof(char *) * (opts->auto_sync_count + 1));

@@ -1168,8 +1168,14 @@ int start_server(const char *host, const char *port, const char *key,
     if (!host || !port || !root || !db_path) return OWSYNC_ERROR;
 
     int sockfd = -1;
-    int port_num = atoi(port);
     int opt = 1;
+    long port_val;
+
+    if (parse_long_strict(port, 1, 65535, &port_val) != OWSYNC_OK) {
+        log_error("Invalid port '%s' (expected 1-65535)", port);
+        return OWSYNC_ERROR;
+    }
+    int port_num = (int)port_val;
 
     /*
      * Handle wildcard addresses explicitly (like lease-sync does).

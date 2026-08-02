@@ -59,4 +59,12 @@ uint8_t *hex_decode(const char *hex, size_t *out_len);
 uint64_t get_time_ms(void);  /* Current time in milliseconds since epoch */
 uint64_t get_time_sec(void); /* Current time in seconds since epoch */
 
+/*
+ * Strict decimal integer parsing.
+ * Rejects NULL, empty strings, leading/trailing garbage and values outside
+ * [min, max]. Unlike atoi(), a malformed value is reported instead of
+ * silently becoming 0.
+ */
+int parse_long_strict(const char *str, long min, long max, long *out);
+
 #endif

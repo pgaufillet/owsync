@@ -37,6 +37,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Hostname now comes from `gethostname()` instead of `$HOSTNAME`, which is
   absent under procd and systemd and made every peer report itself as
   "unknown".
+- Numeric options are validated instead of being passed through `atoi()`,
+  which cannot report an error. On the wildcard binds (`::`, `0.0.0.0` - the
+  default) an unparsable port silently became an ephemeral one, `99999`
+  wrapped to 34463 and `-1` to 65535, so the daemon listened on a port no peer
+  would reach. `--poll-interval -1` became `UINT32_MAX` seconds (~136 years),
+  passing the `< 1` guard because the field is unsigned, which disabled
+  polling. `--log-level abc` silently meant errors-only.
+
+### Changed
+- `--poll-interval 0` is now an error. It never disabled polling: it was
+  silently replaced by the 60 s default.
 
 ### Security
 - Accepted and outgoing sockets have send/receive timeouts, so a peer that
