@@ -34,6 +34,7 @@ security_context_t *security_context_new(const char *key_hex) {
     }
 
     memcpy(ctx->key, key_bytes, AES_KEY_SIZE);
+    explicit_bzero(key_bytes, key_len);
     free(key_bytes);
 
     /* Create reusable OpenSSL cipher context */

@@ -186,6 +186,7 @@ static int parse_options(int argc, char **argv, cli_options_t *opts, int start_i
     /* Copy encryption key from config if present */
     if (config.encryption_key[0] != '\0') {
         opts->key = strdup(config.encryption_key);
+        explicit_bzero(config.encryption_key, sizeof(config.encryption_key));
     }
 
     /* Copy peers from config */

@@ -63,7 +63,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Peer-supplied file mode is masked to `0777` on write, so a peer can no
   longer set setuid/setgid/sticky bits on synced files (the scan side already
   transmits only `0777` bits).
-- The encryption key is scrubbed before being freed.
+- All in-memory copies of the encryption key — the freed CLI buffer, the
+  config-struct field, and the decoded key bytes — are scrubbed with
+  `explicit_bzero`.
 
 ### Removed
 - `-f`/`--foreground`. It never daemonized anything - owsync leaves process
