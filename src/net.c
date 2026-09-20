@@ -784,7 +784,9 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
         return OWSYNC_ERROR_CLOCK_SKEW;
     }
 
-    log_debug("Handshake OK, hostname=%s", peer_hello->payload.hello.hostname);
+    /* A peer may omit hostname; musl's printf dereferences a NULL "%s" arg. */
+    log_debug("Handshake OK, hostname=%s",
+              peer_hello->payload.hello.hostname ? peer_hello->payload.hello.hostname : "(unknown)");
     message_free(peer_hello);
 
     /* Load DB and scan filesystem for current state */
@@ -991,7 +993,7 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
         case MSG_FILE_CONTENT: {
             const char *path = msg->payload.file_content.path;
 
-            if (path[0] == '/' || strstr(path, "..")) {
+            if (!path || path[0] == '/' || strstr(path, "..")) {
                 message_free(msg);
                 continue;
             }
@@ -1048,7 +1050,9 @@ static int handle_protocol(channel_t *channel, const char *root, const char *db_
                     log_error("Write failed for '%s': %s", path, strerror(errno));
                 }
 
-                if (ok && fchmod(fd, msg->payload.file_content.mode) != 0) {
+                /* Mask peer-supplied mode: the scan side only ever sends 0777
+                 * bits, so never honour setuid/setgid/sticky from the wire. */
+                if (ok && fchmod(fd, msg->payload.file_content.mode & 0777) != 0) {
                     log_warning("fchmod failed for '%s': %s", path, strerror(errno));
                 }
 

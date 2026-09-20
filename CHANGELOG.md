@@ -44,6 +44,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   would reach. `--poll-interval -1` became `UINT32_MAX` seconds (~136 years),
   passing the `< 1` guard because the field is unsigned, which disabled
   polling. `--log-level abc` silently meant errors-only.
+- A received `FileContent` with no `path` field dereferenced a NULL pointer
+  and crashed the daemon. The path field is now required.
+- A received `Hello` with no `hostname` field crashed the daemon on musl,
+  where `printf("%s", NULL)` faults (reachable only at debug log level). The
+  value is now guarded.
 
 ### Changed
 - `--poll-interval 0` is now an error. It never disabled polling: it was
@@ -55,6 +60,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Concurrent inbound message buffers are capped in aggregate. Peers could
   previously make the daemon reserve 50 x 32MB by announcing large messages
   and never sending the payload.
+- Peer-supplied file mode is masked to `0777` on write, so a peer can no
+  longer set setuid/setgid/sticky bits on synced files (the scan side already
+  transmits only `0777` bits).
 - The encryption key is scrubbed before being freed.
 
 ### Removed

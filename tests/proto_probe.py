@@ -176,9 +176,92 @@ def probe_alloc_cap(announce, allowed):
     return 0
 
 
+def send_frame(sock, payload):
+    """Send one length-prefixed frame."""
+    sock.sendall(struct.pack(">I", len(payload)) + payload)
+
+
+def daemon_still_serving():
+    """A fresh connection must still get the server side of a handshake."""
+    try:
+        s = connect()
+    except OSError as exc:
+        print("FAIL: daemon stopped accepting connections: %s" % exc)
+        return False
+    alive = recv_message(s) is not None
+    s.close()
+    return alive
+
+
+def probe_filecontent_no_path():
+    """
+    Drive the full handshake, then send a FileContent frame with no "path".
+
+    The server only reaches the FileContent handler after Hello + SyncState
+    exchange, so the probe must answer with a SyncState first. json_to_message
+    then leaves file_content.path NULL and the receive loop dereferences it
+    (path[0]); a crafted or truncated peer must not crash the daemon.
+    """
+    s = connect()
+    if recv_message(s) is None:
+        print("FAIL: server did not send its Hello")
+        return 1
+
+    send_frame(s, hello_bytes())                                  # Hello
+    if recv_message(s) is None:                                   # server SyncState
+        print("FAIL: server did not send its SyncState")
+        return 1
+    send_frame(s, json.dumps({"type": "SyncState", "files": []}).encode())  # our SyncState
+    recv_message(s)  # drain the server's RequestFiles; keep the socket open
+
+    # Now inside the server's receive loop: a FileContent with no "path".
+    send_frame(s, json.dumps({"type": "FileContent", "mode": 420, "data": "41"}).encode())
+    time.sleep(0.3)  # give the server time to process (and, if buggy, to crash)
+
+    if not daemon_still_serving():
+        print("FAIL: daemon died on a FileContent frame with no path")
+        return 1
+
+    s.close()
+    print("OK: FileContent without path ignored, daemon still serving")
+    return 0
+
+
+def probe_filecontent_mode():
+    """
+    Push a file whose mode carries setuid/setgid bits (06755).
+
+    The scan side only ever transmits 0777 bits, so the receiver must mask
+    peer-supplied mode. This probe only delivers the file; test_hardening.sh
+    checks the resulting permission bits on disk (expects 0755, not 06755).
+    """
+    s = connect()
+    if recv_message(s) is None:
+        print("FAIL: server did not send its Hello")
+        return 1
+
+    send_frame(s, hello_bytes())                                  # Hello
+    if recv_message(s) is None:                                   # server SyncState
+        print("FAIL: server did not send its SyncState")
+        return 1
+    send_frame(s, json.dumps({"type": "SyncState", "files": []}).encode())
+    recv_message(s)  # drain RequestFiles; keep socket open
+
+    # 0o6755 = setuid + setgid + rwxr-xr-x
+    send_frame(s, json.dumps(
+        {"type": "FileContent", "path": "modeprobe", "mode": 0o6755, "data": "41"}).encode())
+    time.sleep(0.3)  # let the server write + rename the file
+    s.close()
+
+    print("OK: FileContent with setuid/setgid mode delivered")
+    return 0
+
+
 PROBES = {
     "fragmented": probe_fragmented,
     "zero-length": probe_zero_length,
+    "filecontent-no-path": probe_filecontent_no_path,
+    "filecontent-mode": probe_filecontent_mode,
 }
 
 if __name__ == "__main__":

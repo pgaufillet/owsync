@@ -179,6 +179,30 @@ else
         test_result 1 "peers can reserve unbounded memory before sending payload"
     fi
     stop_listener
+
+    echo ""
+    echo "TEST 5b: FileContent frame with no path field"
+    reset_dirs
+    start_listener 21905 "$BASE/node2"
+    if python3 "$PROBE" filecontent-no-path 21905; then
+        test_result 0 "FileContent without a path is ignored and daemon keeps serving"
+    else
+        test_result 1 "FileContent without a path crashed or wedged the daemon"
+    fi
+    stop_listener
+
+    echo ""
+    echo "TEST 5c: peer-supplied setuid/setgid bits are masked off"
+    reset_dirs
+    start_listener 21906 "$BASE/node2"
+    python3 "$PROBE" filecontent-mode 21906 >/dev/null 2>&1
+    mode=$(stat -c '%a' "$BASE/node2/modeprobe" 2>/dev/null)
+    if [ "$mode" = "755" ]; then
+        test_result 0 "peer mode 06755 was masked to 0755 on write"
+    else
+        test_result 1 "peer setuid/setgid bits survived (mode=${mode:-missing})"
+    fi
+    stop_listener
 fi
 
 # ---------------------------------------------------------------------------
