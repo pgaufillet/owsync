@@ -8,7 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define OWSYNC_VERSION "1.2.0"
+#define OWSYNC_VERSION "1.3.0"
 #define PROTOCOL_VERSION 1                          /* Wire protocol version for compatibility checks */
 #define MAX_PATH_LEN 4096                           /* Maximum file path length */
 

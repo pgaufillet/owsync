@@ -4,7 +4,7 @@ All notable changes to owsync are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.3.0] - 2026-09-20
 
 ### Fixed
 - Heap read overflow on every received message: wire buffers were parsed with
